@@ -210,7 +210,11 @@ const PublisherDashboard: React.FC = () => {
         coverForm.append('cover', coverFile);
         const coverRes = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'x-napaextra-url': import.meta.env.VITE_NAPAEXTRA_URL || '',
+            'x-napaextra-password': import.meta.env.VITE_NAPAEXTRA_PASSWORD || '',
+          },
           body: coverForm,
         });
         const coverResult = await coverRes.json();
