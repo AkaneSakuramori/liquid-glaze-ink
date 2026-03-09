@@ -626,9 +626,19 @@ const PublisherDashboard: React.FC = () => {
                         )}
                       </div>
 
+                      {uploadingChapter && uploadProgress > 0 && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>Uploading page {Math.ceil((uploadProgress / 100) * pageFiles.length)} of {pageFiles.length}...</span>
+                            <span>{uploadProgress}%</span>
+                          </div>
+                          <Progress value={uploadProgress} className="h-2" />
+                        </div>
+                      )}
+
                       <button type="submit" disabled={pageFiles.length === 0 || uploadingChapter || (scheduleEnabled && (!scheduledDate || !scheduledTime))} className="w-full btn-accent rounded-none py-3 text-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                         {uploadingChapter && <Loader2 className="w-4 h-4 animate-spin" />}
-                        {uploadingChapter ? `Uploading ${pageFiles.length} pages...` : scheduleEnabled ? `Schedule Chapter ${chapterNumber}` : `Upload Chapter ${chapterNumber}`}
+                        {uploadingChapter ? `Uploading... ${uploadProgress}%` : scheduleEnabled ? `Schedule Chapter ${chapterNumber}` : `Upload Chapter ${chapterNumber}`}
                       </button>
                     </form>
 
