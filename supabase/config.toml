@@ -1,13 +1,1 @@
-project_id = "lpozkutezttxiwafhwul"
-
-[functions.telegram-community]
-verify_jwt = false
-
-[functions.sitemap]
-verify_jwt = false
-
-[functions.send-email]
-verify_jwt = false
-
-[functions.stremio-addon]
-verify_jwt = false
+project_id = "qtesourmogwgqpskjlxl"
