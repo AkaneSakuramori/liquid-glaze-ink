@@ -286,39 +286,24 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      // Upload pages to Telegram via edge function
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
       if (!token) throw new Error('Not authenticated');
 
-      const formData = new FormData();
-      formData.append('manga_id', selectedMangaId);
-      formData.append('chapter_id', chapter.id);
-      pageFiles.forEach((file) => {
-        formData.append('pages', file);
-      });
-
-      const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
-      const res = await fetch(
-        `https://${projectId}.supabase.co/functions/v1/telegram-upload`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          body: formData,
+      // Upload pages one-by-one with progress
+      for (let i = 0; i < pageFiles.length; i++) {
+        try {
+          await uploadSinglePage(token, selectedMangaId, chapter.id, pageFiles[i], i + 1);
+        } catch (err: any) {
+          // Clean up chapter if upload failed
+          await supabase.from('chapters').delete().eq('id', chapter.id);
+          throw new Error(`Page ${i + 1} failed: ${err.message}`);
         }
-      );
-
-      const result = await res.json();
-      if (!result.success) {
-        // Clean up chapter if upload failed
-        await supabase.from('chapters').delete().eq('id', chapter.id);
-        throw new Error(result.error || 'Upload failed');
+        setUploadProgress(Math.round(((i + 1) / pageFiles.length) * 100));
       }
 
       const schedLabel = scheduledAt ? ` (scheduled for ${new Date(scheduledAt).toLocaleString()})` : '';
-      toast.success(`Chapter ${chapterNumber} uploaded!${schedLabel} (${result.pages_uploaded} pages) — Admin will review before publishing.`);
+      toast.success(`🎉 Chapter ${chapterNumber} uploaded!${schedLabel} (${pageFiles.length} pages) — Admin will review before publishing.`);
       setPageFiles([]);
       setChapterTitle('');
       setChapterNumber(prev => prev + 1);
