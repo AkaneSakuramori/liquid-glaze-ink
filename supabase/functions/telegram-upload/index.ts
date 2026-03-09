@@ -3,10 +3,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+    "authorization, x-client-info, apikey, content-type, x-napaextra-url, x-napaextra-password, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
-
-const CDN_BASE = Deno.env.get("NAPAEXTRA_URL") || "";
 
 function getSupabase() {
   return createClient(
@@ -17,18 +15,16 @@ function getSupabase() {
 
 /**
  * Upload a single file to NapaExtra CDN using /api/upload (direct multipart).
- * 1. ensurePath → get folder
- * 2. /api/upload → direct multipart upload
- * 3. Return CDN view URL
  */
 async function uploadToNapaExtra(
   file: File,
   folderPath: string[],
   filename: string,
+  cdnBase: string,
   password: string
 ): Promise<string> {
   // 1. Create folder structure
-  const ensureRes = await fetch(`${CDN_BASE}/api/ensurePath`, {
+  const ensureRes = await fetch(`${cdnBase}/api/ensurePath`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password, folder_hierarchy: folderPath }),
@@ -38,7 +34,7 @@ async function uploadToNapaExtra(
     throw new Error(`ensurePath failed: ${JSON.stringify(ensureData)}`);
   }
 
-  // 2. Direct multipart upload to /api/upload
+  // 2. Direct multipart upload
   const uploadForm = new FormData();
   uploadForm.append("file", file, filename);
   uploadForm.append("path", ensureData.final_upload_path);
@@ -46,7 +42,7 @@ async function uploadToNapaExtra(
   uploadForm.append("id", `upload_${Date.now()}`);
   uploadForm.append("total_size", String(file.size));
 
-  const uploadRes = await fetch(`${CDN_BASE}/api/upload`, {
+  const uploadRes = await fetch(`${cdnBase}/api/upload`, {
     method: "POST",
     body: uploadForm,
   });
@@ -55,7 +51,6 @@ async function uploadToNapaExtra(
     throw new Error(`Upload failed: ${JSON.stringify(uploadData)}`);
   }
 
-  // 3. Return the file ID (NOT full URL — store only the ID per API best practice)
   return uploadData.id;
 }
 
@@ -65,9 +60,12 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const NAPAEXTRA_PASSWORD = Deno.env.get("NAPAEXTRA_PASSWORD");
-    if (!NAPAEXTRA_PASSWORD) throw new Error("NAPAEXTRA_PASSWORD not configured");
-    if (!CDN_BASE) throw new Error("NAPAEXTRA_URL not configured");
+    // Read CDN credentials from request headers (passed from frontend .env)
+    const CDN_BASE = req.headers.get("x-napaextra-url") || "";
+    const NAPAEXTRA_PASSWORD = req.headers.get("x-napaextra-password") || "";
+
+    if (!CDN_BASE) throw new Error("NAPAEXTRA_URL not provided");
+    if (!NAPAEXTRA_PASSWORD) throw new Error("NAPAEXTRA_PASSWORD not provided");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader) throw new Error("No authorization header");
@@ -96,7 +94,6 @@ Deno.serve(async (req) => {
     const mangaId = formData.get("manga_id") as string;
 
     if (uploadType === "cover") {
-      // ─── Cover Image Upload ──────────────────────────────────
       const coverFile = formData.get("cover") as File;
       if (!mangaId || !coverFile) throw new Error("manga_id and cover file required");
 
@@ -112,10 +109,10 @@ Deno.serve(async (req) => {
         coverFile,
         [manga.title, "covers"],
         `cover.${ext}`,
+        CDN_BASE,
         NAPAEXTRA_PASSWORD
       );
 
-      // Store the full CDN URL for covers
       const cdnUrl = `${CDN_BASE}/view/${fileId}`;
       await supabase.from("manga").update({ cover_url: cdnUrl }).eq("id", mangaId);
 
@@ -125,7 +122,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ─── Single Page Upload (for progress tracking) ─────────
     if (uploadType === "single_page") {
       const chapterId = formData.get("chapter_id") as string;
       const pageFile = formData.get("page") as File;
@@ -156,10 +152,10 @@ Deno.serve(async (req) => {
         pageFile,
         [manga.title, chapterFolder],
         filename,
+        CDN_BASE,
         NAPAEXTRA_PASSWORD
       );
 
-      // Store the file ID (not full URL) for pages
       const cdnUrl = `${CDN_BASE}/view/${fileId}`;
 
       const { error: insertError } = await supabase.from("chapter_pages").insert({
@@ -176,7 +172,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ─── Batch Chapter Pages Upload (legacy) ────────────────
+    // Batch upload (legacy)
     const chapterId = formData.get("chapter_id") as string;
     const files = formData.getAll("pages") as File[];
 
@@ -215,6 +211,7 @@ Deno.serve(async (req) => {
         file,
         [manga.title, chapterFolder],
         filename,
+        CDN_BASE,
         NAPAEXTRA_PASSWORD
       );
 
@@ -234,7 +231,6 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         pages_uploaded: uploadedPages.length,
-        manga_short_id: mangaId.slice(0, 8).toUpperCase(),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
