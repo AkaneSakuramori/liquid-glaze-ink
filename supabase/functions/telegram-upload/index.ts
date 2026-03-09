@@ -90,6 +90,7 @@ Deno.serve(async (req) => {
   try {
     const NAPAEXTRA_PASSWORD = Deno.env.get("NAPAEXTRA_PASSWORD");
     if (!NAPAEXTRA_PASSWORD) throw new Error("NAPAEXTRA_PASSWORD not configured");
+    if (!CDN_BASE) throw new Error("NAPAEXTRA_URL not configured");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader) throw new Error("No authorization header");
