@@ -143,13 +143,23 @@ const PublisherDashboard: React.FC = () => {
 
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'x-napaextra-url': import.meta.env.VITE_NAPAEXTRA_URL || '',
+        'x-napaextra-password': import.meta.env.VITE_NAPAEXTRA_PASSWORD || '',
+      },
       body: formData,
     });
     const result = await res.json();
     if (!result.success) throw new Error(result.error || `Page ${pageNumber} upload failed`);
     return result;
   };
+
+  const getUploadHeaders = (token: string) => ({
+    Authorization: `Bearer ${token}`,
+    'x-napaextra-url': import.meta.env.VITE_NAPAEXTRA_URL || '',
+    'x-napaextra-password': import.meta.env.VITE_NAPAEXTRA_PASSWORD || '',
+  });
 
   const handleCreateManga = async (e: React.FormEvent) => {
     e.preventDefault();
