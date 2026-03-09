@@ -6,69 +6,148 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const CDN_BASE = "https://ltd-alethea-nbhi763-bc60a88e.koyeb.app";
+const BUCKET = "manga-images";
+
+function getSupabase() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
+}
+
+/**
+ * Upload a file to NapaExtra CDN via Supabase Storage as intermediary.
+ * 1. Upload to Supabase Storage (temp) → get public URL
+ * 2. ensurePath on NapaExtra → get folder path
+ * 3. startFileDownloadFromUrl → get NapaExtra file_id
+ * 4. Return full CDN URL
+ */
+async function uploadToNapaExtra(
+  supabase: ReturnType<typeof getSupabase>,
+  file: File,
+  folderPath: string[],
+  filename: string,
+  password: string
+): Promise<string> {
+  const tempPath = `temp/${crypto.randomUUID()}_${filename}`;
+  const fileBuffer = await file.arrayBuffer();
+
+  // 1. Upload to Supabase Storage temporarily
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET)
+    .upload(tempPath, fileBuffer, {
+      contentType: file.type || "image/jpeg",
+      upsert: true,
+    });
+  if (uploadError) throw new Error(`Temp upload failed: ${uploadError.message}`);
+
+  // 2. Get public URL
+  const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(tempPath);
+  const publicUrl = urlData.publicUrl;
+
+  try {
+    // 3. Create folder structure on NapaExtra
+    const ensureRes = await fetch(`${CDN_BASE}/api/ensurePath`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password, folder_hierarchy: folderPath }),
+    });
+    const ensureData = await ensureRes.json();
+    if (ensureData.status !== "ok") {
+      throw new Error(`ensurePath failed: ${JSON.stringify(ensureData)}`);
+    }
+
+    // 4. Tell NapaExtra to download from our public URL
+    const dlRes = await fetch(`${CDN_BASE}/api/startFileDownloadFromUrl`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: publicUrl,
+        path: ensureData.final_upload_path,
+        filename,
+        password,
+      }),
+    });
+    const dlData = await dlRes.json();
+    if (dlData.status !== "ok") {
+      throw new Error(`NapaExtra upload failed: ${JSON.stringify(dlData)}`);
+    }
+
+    // 5. Return full CDN URL (dlData.id is the NapaExtra file_id)
+    return `${CDN_BASE}/view/${dlData.id}`;
+  } finally {
+    // 6. Clean up temp file from storage (fire and forget)
+    supabase.storage.from(BUCKET).remove([tempPath]).catch(() => {});
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { status: 200, headers: corsHeaders });
   }
 
   try {
-    const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN");
-    const TELEGRAM_CHANNEL_ID = Deno.env.get("TELEGRAM_CHANNEL_ID");
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
-    if (!TELEGRAM_BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN not configured");
-    if (!TELEGRAM_CHANNEL_ID) throw new Error("TELEGRAM_CHANNEL_ID not configured");
+    const NAPAEXTRA_PASSWORD = Deno.env.get("NAPAEXTRA_PASSWORD");
+    if (!NAPAEXTRA_PASSWORD) throw new Error("NAPAEXTRA_PASSWORD not configured");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader) throw new Error("No authorization header");
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const anonClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!);
+    const supabase = getSupabase();
+    const anonClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!
+    );
 
     const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await anonClient.auth.getUser(token);
+    const {
+      data: { user },
+      error: authError,
+    } = await anonClient.auth.getUser(token);
     if (authError || !user) throw new Error("Unauthorized");
 
-    const { data: hasPublisher } = await supabase.rpc("has_role", { _user_id: user.id, _role: "publisher" });
+    const { data: hasPublisher } = await supabase.rpc("has_role", {
+      _user_id: user.id,
+      _role: "publisher",
+    });
     if (!hasPublisher) throw new Error("Only publishers can upload");
 
     const formData = await req.formData();
-    const uploadType = formData.get("type") as string || "chapter"; // "chapter" or "cover"
+    const uploadType = (formData.get("type") as string) || "chapter";
     const mangaId = formData.get("manga_id") as string;
 
     if (uploadType === "cover") {
-      // Cover image upload
+      // ─── Cover Image Upload ──────────────────────────────────
       const coverFile = formData.get("cover") as File;
       if (!mangaId || !coverFile) throw new Error("manga_id and cover file required");
 
-      // Verify ownership
-      const { data: manga } = await supabase.from("manga").select("id, creator_id, title").eq("id", mangaId).single();
+      const { data: manga } = await supabase
+        .from("manga")
+        .select("id, creator_id, title")
+        .eq("id", mangaId)
+        .single();
       if (!manga || manga.creator_id !== user.id) throw new Error("Not your manga");
 
-      const shortId = mangaId.slice(0, 8).toUpperCase();
-      const tgForm = new FormData();
-      tgForm.append("chat_id", TELEGRAM_CHANNEL_ID);
-      tgForm.append("document", coverFile, `cover_${shortId}.${coverFile.name.split('.').pop() || 'jpg'}`);
-      tgForm.append("caption", `🖼️ COVER | ID: ${shortId} | ${manga.title}`);
+      const ext = coverFile.name.split(".").pop() || "jpg";
+      const cdnUrl = await uploadToNapaExtra(
+        supabase,
+        coverFile,
+        [manga.title, "covers"],
+        `cover.${ext}`,
+        NAPAEXTRA_PASSWORD
+      );
 
-      const tgRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: tgForm });
-      const tgData = await tgRes.json();
-      if (!tgData.ok) throw new Error(`Telegram cover upload failed: ${tgData.description}`);
+      // Save full CDN URL in cover_url
+      await supabase.from("manga").update({ cover_url: cdnUrl }).eq("id", mangaId);
 
-      // Handle both document and photo responses from Telegram
-      const fileId = tgData.result?.document?.file_id
-        || tgData.result?.photo?.slice(-1)?.[0]?.file_id
-        || tgData.result?.video?.file_id;
-      if (!fileId) throw new Error(`Telegram returned no file_id. Response: ${JSON.stringify(tgData.result).slice(0, 200)}`);
-
-      // Update manga cover_url with telegram file_id
-      await supabase.from("manga").update({ cover_url: fileId }).eq("id", mangaId);
-
-      return new Response(JSON.stringify({ success: true, cover_file_id: fileId }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      return new Response(
+        JSON.stringify({ success: true, cover_file_id: cdnUrl }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    // Chapter pages upload
+    // ─── Chapter Pages Upload ────────────────────────────────
     const chapterId = formData.get("chapter_id") as string;
     const files = formData.getAll("pages") as File[];
 
@@ -76,54 +155,63 @@ Deno.serve(async (req) => {
       throw new Error("manga_id, chapter_id, and pages are required");
     }
 
-    const { data: manga, error: mangaError } = await supabase.from("manga").select("id, creator_id, title").eq("id", mangaId).single();
+    const { data: manga, error: mangaError } = await supabase
+      .from("manga")
+      .select("id, creator_id, title")
+      .eq("id", mangaId)
+      .single();
     if (mangaError || !manga) throw new Error("Manga not found");
     if (manga.creator_id !== user.id) throw new Error("Not your manga");
 
-    const shortId = mangaId.slice(0, 8).toUpperCase();
-    const uploadedPages: { page_number: number; telegram_file_id: string; file_size: number }[] = [];
+    const { data: chapter } = await supabase
+      .from("chapters")
+      .select("chapter_number")
+      .eq("id", chapterId)
+      .single();
+    const chapterFolder = `Chapter_${chapter?.chapter_number || chapterId.slice(0, 8)}`;
+
+    const uploadedPages: {
+      chapter_id: string;
+      page_number: number;
+      telegram_file_id: string;
+      file_size: number;
+    }[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const tgForm = new FormData();
-      tgForm.append("chat_id", TELEGRAM_CHANNEL_ID);
-      tgForm.append("document", file, `page_${i + 1}.${file.name.split('.').pop() || 'jpg'}`);
-      tgForm.append("caption", `📄 ID: ${shortId} | ${manga.title} | Ch: ${chapterId.slice(0, 8)} | Page ${i + 1}`);
+      const ext = file.name.split(".").pop() || "jpg";
+      const filename = `page_${String(i + 1).padStart(3, "0")}.${ext}`;
 
-      const tgRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: tgForm });
-      const tgData = await tgRes.json();
-      if (!tgData.ok) throw new Error(`Telegram upload failed for page ${i + 1}: ${tgData.description}`);
-
-      // Handle both document and photo responses from Telegram
-      const pageFileId = tgData.result?.document?.file_id
-        || tgData.result?.photo?.slice(-1)?.[0]?.file_id
-        || tgData.result?.video?.file_id;
-      if (!pageFileId) throw new Error(`Telegram returned no file_id for page ${i + 1}`);
+      const cdnUrl = await uploadToNapaExtra(
+        supabase,
+        file,
+        [manga.title, chapterFolder],
+        filename,
+        NAPAEXTRA_PASSWORD
+      );
 
       uploadedPages.push({
+        chapter_id: chapterId,
         page_number: i + 1,
-        telegram_file_id: pageFileId,
-        file_size: tgData.result?.document?.file_size || 0,
+        telegram_file_id: cdnUrl, // Full CDN URL stored in telegram_file_id column
+        file_size: file.size,
       });
     }
 
-    const pageRecords = uploadedPages.map((p) => ({
-      chapter_id: chapterId,
-      page_number: p.page_number,
-      telegram_file_id: p.telegram_file_id,
-      file_size: p.file_size,
-    }));
-
-    const { error: insertError } = await supabase.from("chapter_pages").insert(pageRecords);
+    const { error: insertError } = await supabase.from("chapter_pages").insert(uploadedPages);
     if (insertError) throw new Error(`DB insert failed: ${insertError.message}`);
 
     return new Response(
-      JSON.stringify({ success: true, pages_uploaded: uploadedPages.length, manga_short_id: shortId }),
+      JSON.stringify({
+        success: true,
+        pages_uploaded: uploadedPages.length,
+        manga_short_id: mangaId.slice(0, 8).toUpperCase(),
+      }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.error("telegram-upload error:", message);
+    console.error("upload error:", message);
     return new Response(
       JSON.stringify({ success: false, error: message }),
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
