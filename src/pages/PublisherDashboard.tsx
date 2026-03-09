@@ -126,6 +126,31 @@ const PublisherDashboard: React.FC = () => {
     }
   };
 
+  const uploadSinglePage = async (
+    token: string,
+    mangaId: string,
+    chapterId: string,
+    file: File,
+    pageNumber: number
+  ) => {
+    const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
+    const formData = new FormData();
+    formData.append('type', 'single_page');
+    formData.append('manga_id', mangaId);
+    formData.append('chapter_id', chapterId);
+    formData.append('page', file);
+    formData.append('page_number', String(pageNumber));
+
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const result = await res.json();
+    if (!result.success) throw new Error(result.error || `Page ${pageNumber} upload failed`);
+    return result;
+  };
+
   const handleCreateManga = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !uploadTitle || !copyrightChecked) return;
@@ -135,6 +160,7 @@ const PublisherDashboard: React.FC = () => {
     }
 
     setSubmitting(true);
+    setUploadProgress(0);
     try {
       const slug = slugify(uploadTitle) + '-' + Date.now().toString(36);
       const session = await supabase.auth.getSession();
@@ -163,7 +189,10 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      // 2. Upload cover to Telegram if provided
+      const totalFiles = ch1Files.length + (coverFile ? 1 : 0);
+      let uploaded = 0;
+
+      // 2. Upload cover if provided
       if (coverFile) {
         const coverForm = new FormData();
         coverForm.append('type', 'cover');
@@ -176,9 +205,11 @@ const PublisherDashboard: React.FC = () => {
         });
         const coverResult = await coverRes.json();
         if (!coverResult.success) console.error('Cover upload failed:', coverResult.error);
+        uploaded++;
+        setUploadProgress(Math.round((uploaded / totalFiles) * 100));
       }
 
-      // 3. Create chapter 1 and upload pages
+      // 3. Create chapter 1
       const { data: chapter, error: chapterError } = await supabase
         .from('chapters')
         .insert({ manga_id: manga.id, chapter_number: 1, title: ch1Title || null })
@@ -190,23 +221,14 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      const pageForm = new FormData();
-      pageForm.append('manga_id', manga.id);
-      pageForm.append('chapter_id', chapter.id);
-      ch1Files.forEach(file => pageForm.append('pages', file));
-
-      const pageRes = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: pageForm,
-      });
-      const pageResult = await pageRes.json();
-      if (!pageResult.success) {
-        toast.error('Chapter upload failed: ' + pageResult.error);
-        return;
+      // 4. Upload pages one-by-one with progress
+      for (let i = 0; i < ch1Files.length; i++) {
+        await uploadSinglePage(token, manga.id, chapter.id, ch1Files[i], i + 1);
+        uploaded++;
+        setUploadProgress(Math.round((uploaded / totalFiles) * 100));
       }
 
-      toast.success(`Manhwa submitted with Chapter 1 (${pageResult.pages_uploaded} pages)! Admin will review within 48 hours.`);
+      toast.success(`🎉 Manhwa submitted with Chapter 1 (${ch1Files.length} pages)! Admin will review within 48 hours.`);
       setUploadTitle(''); setUploadDesc(''); setUploadGenres([]); setCopyrightChecked(false);
       setCoverFile(null); setCoverPreview(null); setCh1Files([]); setCh1Title('');
       queryClient.invalidateQueries({ queryKey: ['creator-manga'] });
@@ -215,6 +237,7 @@ const PublisherDashboard: React.FC = () => {
       toast.error(err.message || 'Failed to create manhwa');
     } finally {
       setSubmitting(false);
+      setUploadProgress(0);
     }
   };
 
