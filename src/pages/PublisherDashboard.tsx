@@ -6,6 +6,7 @@ import { BookOpen, Upload, BarChart3, Settings, Trash2, Edit, Plus, Image, FileT
 import { toast } from 'sonner';
 import CreatorAnalytics from '@/components/CreatorAnalytics';
 import CreatorEarnings from '@/components/CreatorEarnings';
+import { Progress } from '@/components/ui/progress';
 
 const allGenres = [
   'Action', 'Fantasy', 'Romance', 'Sci-Fi', 'Thriller', 'Drama',
