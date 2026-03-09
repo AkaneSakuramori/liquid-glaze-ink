@@ -7,7 +7,6 @@ const corsHeaders = {
 };
 
 const CDN_BASE = Deno.env.get("NAPAEXTRA_URL") || "";
-const BUCKET = "manga-images";
 
 function getSupabase() {
   return createClient(
@@ -17,69 +16,47 @@ function getSupabase() {
 }
 
 /**
- * Upload a file to NapaExtra CDN via Supabase Storage as intermediary.
- * 1. Upload to Supabase Storage (temp) → get public URL
- * 2. ensurePath on NapaExtra → get folder path
- * 3. startFileDownloadFromUrl → get NapaExtra file_id
- * 4. Return full CDN URL
+ * Upload a single file to NapaExtra CDN using /api/upload (direct multipart).
+ * 1. ensurePath → get folder
+ * 2. /api/upload → direct multipart upload
+ * 3. Return CDN view URL
  */
 async function uploadToNapaExtra(
-  supabase: ReturnType<typeof getSupabase>,
   file: File,
   folderPath: string[],
   filename: string,
   password: string
 ): Promise<string> {
-  const tempPath = `temp/${crypto.randomUUID()}_${filename}`;
-  const fileBuffer = await file.arrayBuffer();
-
-  // 1. Upload to Supabase Storage temporarily
-  const { error: uploadError } = await supabase.storage
-    .from(BUCKET)
-    .upload(tempPath, fileBuffer, {
-      contentType: file.type || "image/jpeg",
-      upsert: true,
-    });
-  if (uploadError) throw new Error(`Temp upload failed: ${uploadError.message}`);
-
-  // 2. Get public URL
-  const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(tempPath);
-  const publicUrl = urlData.publicUrl;
-
-  try {
-    // 3. Create folder structure on NapaExtra
-    const ensureRes = await fetch(`${CDN_BASE}/api/ensurePath`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password, folder_hierarchy: folderPath }),
-    });
-    const ensureData = await ensureRes.json();
-    if (ensureData.status !== "ok") {
-      throw new Error(`ensurePath failed: ${JSON.stringify(ensureData)}`);
-    }
-
-    // 4. Tell NapaExtra to download from our public URL
-    const dlRes = await fetch(`${CDN_BASE}/api/startFileDownloadFromUrl`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: publicUrl,
-        path: ensureData.final_upload_path,
-        filename,
-        password,
-      }),
-    });
-    const dlData = await dlRes.json();
-    if (dlData.status !== "ok") {
-      throw new Error(`NapaExtra upload failed: ${JSON.stringify(dlData)}`);
-    }
-
-    // 5. Return full CDN URL (dlData.id is the NapaExtra file_id)
-    return `${CDN_BASE}/view/${dlData.id}`;
-  } finally {
-    // 6. Clean up temp file from storage (fire and forget)
-    supabase.storage.from(BUCKET).remove([tempPath]).catch(() => {});
+  // 1. Create folder structure
+  const ensureRes = await fetch(`${CDN_BASE}/api/ensurePath`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password, folder_hierarchy: folderPath }),
+  });
+  const ensureData = await ensureRes.json();
+  if (ensureData.status !== "ok") {
+    throw new Error(`ensurePath failed: ${JSON.stringify(ensureData)}`);
   }
+
+  // 2. Direct multipart upload to /api/upload
+  const uploadForm = new FormData();
+  uploadForm.append("file", file, filename);
+  uploadForm.append("path", ensureData.final_upload_path);
+  uploadForm.append("password", password);
+  uploadForm.append("id", `upload_${Date.now()}`);
+  uploadForm.append("total_size", String(file.size));
+
+  const uploadRes = await fetch(`${CDN_BASE}/api/upload`, {
+    method: "POST",
+    body: uploadForm,
+  });
+  const uploadData = await uploadRes.json();
+  if (uploadData.status !== "ok") {
+    throw new Error(`Upload failed: ${JSON.stringify(uploadData)}`);
+  }
+
+  // 3. Return the file ID (NOT full URL — store only the ID per API best practice)
+  return uploadData.id;
 }
 
 Deno.serve(async (req) => {
@@ -131,15 +108,15 @@ Deno.serve(async (req) => {
       if (!manga || manga.creator_id !== user.id) throw new Error("Not your manga");
 
       const ext = coverFile.name.split(".").pop() || "jpg";
-      const cdnUrl = await uploadToNapaExtra(
-        supabase,
+      const fileId = await uploadToNapaExtra(
         coverFile,
         [manga.title, "covers"],
         `cover.${ext}`,
         NAPAEXTRA_PASSWORD
       );
 
-      // Save full CDN URL in cover_url
+      // Store the full CDN URL for covers
+      const cdnUrl = `${CDN_BASE}/view/${fileId}`;
       await supabase.from("manga").update({ cover_url: cdnUrl }).eq("id", mangaId);
 
       return new Response(
@@ -148,7 +125,58 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ─── Chapter Pages Upload ────────────────────────────────
+    // ─── Single Page Upload (for progress tracking) ─────────
+    if (uploadType === "single_page") {
+      const chapterId = formData.get("chapter_id") as string;
+      const pageFile = formData.get("page") as File;
+      const pageNumber = parseInt(formData.get("page_number") as string);
+
+      if (!mangaId || !chapterId || !pageFile || !pageNumber) {
+        throw new Error("manga_id, chapter_id, page, and page_number required");
+      }
+
+      const { data: manga } = await supabase
+        .from("manga")
+        .select("id, creator_id, title")
+        .eq("id", mangaId)
+        .single();
+      if (!manga || manga.creator_id !== user.id) throw new Error("Not your manga");
+
+      const { data: chapter } = await supabase
+        .from("chapters")
+        .select("chapter_number")
+        .eq("id", chapterId)
+        .single();
+      const chapterFolder = `Chapter_${chapter?.chapter_number || chapterId.slice(0, 8)}`;
+
+      const ext = pageFile.name.split(".").pop() || "jpg";
+      const filename = `page_${String(pageNumber).padStart(3, "0")}.${ext}`;
+
+      const fileId = await uploadToNapaExtra(
+        pageFile,
+        [manga.title, chapterFolder],
+        filename,
+        NAPAEXTRA_PASSWORD
+      );
+
+      // Store the file ID (not full URL) for pages
+      const cdnUrl = `${CDN_BASE}/view/${fileId}`;
+
+      const { error: insertError } = await supabase.from("chapter_pages").insert({
+        chapter_id: chapterId,
+        page_number: pageNumber,
+        telegram_file_id: cdnUrl,
+        file_size: pageFile.size,
+      });
+      if (insertError) throw new Error(`DB insert failed: ${insertError.message}`);
+
+      return new Response(
+        JSON.stringify({ success: true, page_number: pageNumber, file_id: fileId }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // ─── Batch Chapter Pages Upload (legacy) ────────────────
     const chapterId = formData.get("chapter_id") as string;
     const files = formData.getAll("pages") as File[];
 
@@ -183,18 +211,18 @@ Deno.serve(async (req) => {
       const ext = file.name.split(".").pop() || "jpg";
       const filename = `page_${String(i + 1).padStart(3, "0")}.${ext}`;
 
-      const cdnUrl = await uploadToNapaExtra(
-        supabase,
+      const fileId = await uploadToNapaExtra(
         file,
         [manga.title, chapterFolder],
         filename,
         NAPAEXTRA_PASSWORD
       );
 
+      const cdnUrl = `${CDN_BASE}/view/${fileId}`;
       uploadedPages.push({
         chapter_id: chapterId,
         page_number: i + 1,
-        telegram_file_id: cdnUrl, // Full CDN URL stored in telegram_file_id column
+        telegram_file_id: cdnUrl,
         file_size: file.size,
       });
     }
