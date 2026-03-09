@@ -518,9 +518,19 @@ const PublisherDashboard: React.FC = () => {
                   </label>
                 </div>
 
+                {submitting && uploadProgress > 0 && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Uploading pages...</span>
+                      <span>{uploadProgress}%</span>
+                    </div>
+                    <Progress value={uploadProgress} className="h-2" />
+                  </div>
+                )}
+
                 <button type="submit" disabled={!copyrightChecked || !uploadTitle || ch1Files.length === 0 || submitting} className="w-full btn-accent rounded-none py-3 text-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                   {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {submitting ? 'Submitting...' : 'Submit with Chapter 1 for Review'}
+                  {submitting ? `Uploading... ${uploadProgress}%` : 'Submit with Chapter 1 for Review'}
                 </button>
               </form>
             </div>
