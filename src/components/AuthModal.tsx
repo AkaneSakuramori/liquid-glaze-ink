@@ -116,7 +116,12 @@ const AuthModal: React.FC = () => {
       username: usernameCheck.normalized || undefined,
     });
 
-    if (!res.success) setError(res.error || 'Signup failed');
+    if (!res.success) {
+      setError(res.error || 'Signup failed');
+    } else {
+      setSuccessMsg('🎉 Account created! Please check your email to verify your account before logging in.');
+      setError('');
+    }
     setSubmitting(false);
   };
 

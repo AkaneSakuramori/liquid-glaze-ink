@@ -6,6 +6,7 @@ import { BookOpen, Upload, BarChart3, Settings, Trash2, Edit, Plus, Image, FileT
 import { toast } from 'sonner';
 import CreatorAnalytics from '@/components/CreatorAnalytics';
 import CreatorEarnings from '@/components/CreatorEarnings';
+import { Progress } from '@/components/ui/progress';
 
 const allGenres = [
   'Action', 'Fantasy', 'Romance', 'Sci-Fi', 'Thriller', 'Drama',
@@ -125,6 +126,31 @@ const PublisherDashboard: React.FC = () => {
     }
   };
 
+  const uploadSinglePage = async (
+    token: string,
+    mangaId: string,
+    chapterId: string,
+    file: File,
+    pageNumber: number
+  ) => {
+    const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
+    const formData = new FormData();
+    formData.append('type', 'single_page');
+    formData.append('manga_id', mangaId);
+    formData.append('chapter_id', chapterId);
+    formData.append('page', file);
+    formData.append('page_number', String(pageNumber));
+
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const result = await res.json();
+    if (!result.success) throw new Error(result.error || `Page ${pageNumber} upload failed`);
+    return result;
+  };
+
   const handleCreateManga = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !uploadTitle || !copyrightChecked) return;
@@ -134,6 +160,7 @@ const PublisherDashboard: React.FC = () => {
     }
 
     setSubmitting(true);
+    setUploadProgress(0);
     try {
       const slug = slugify(uploadTitle) + '-' + Date.now().toString(36);
       const session = await supabase.auth.getSession();
@@ -162,7 +189,10 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      // 2. Upload cover to Telegram if provided
+      const totalFiles = ch1Files.length + (coverFile ? 1 : 0);
+      let uploaded = 0;
+
+      // 2. Upload cover if provided
       if (coverFile) {
         const coverForm = new FormData();
         coverForm.append('type', 'cover');
@@ -175,9 +205,11 @@ const PublisherDashboard: React.FC = () => {
         });
         const coverResult = await coverRes.json();
         if (!coverResult.success) console.error('Cover upload failed:', coverResult.error);
+        uploaded++;
+        setUploadProgress(Math.round((uploaded / totalFiles) * 100));
       }
 
-      // 3. Create chapter 1 and upload pages
+      // 3. Create chapter 1
       const { data: chapter, error: chapterError } = await supabase
         .from('chapters')
         .insert({ manga_id: manga.id, chapter_number: 1, title: ch1Title || null })
@@ -189,23 +221,14 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      const pageForm = new FormData();
-      pageForm.append('manga_id', manga.id);
-      pageForm.append('chapter_id', chapter.id);
-      ch1Files.forEach(file => pageForm.append('pages', file));
-
-      const pageRes = await fetch(`https://${projectId}.supabase.co/functions/v1/telegram-upload`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: pageForm,
-      });
-      const pageResult = await pageRes.json();
-      if (!pageResult.success) {
-        toast.error('Chapter upload failed: ' + pageResult.error);
-        return;
+      // 4. Upload pages one-by-one with progress
+      for (let i = 0; i < ch1Files.length; i++) {
+        await uploadSinglePage(token, manga.id, chapter.id, ch1Files[i], i + 1);
+        uploaded++;
+        setUploadProgress(Math.round((uploaded / totalFiles) * 100));
       }
 
-      toast.success(`Manhwa submitted with Chapter 1 (${pageResult.pages_uploaded} pages)! Admin will review within 48 hours.`);
+      toast.success(`🎉 Manhwa submitted with Chapter 1 (${ch1Files.length} pages)! Admin will review within 48 hours.`);
       setUploadTitle(''); setUploadDesc(''); setUploadGenres([]); setCopyrightChecked(false);
       setCoverFile(null); setCoverPreview(null); setCh1Files([]); setCh1Title('');
       queryClient.invalidateQueries({ queryKey: ['creator-manga'] });
@@ -214,6 +237,7 @@ const PublisherDashboard: React.FC = () => {
       toast.error(err.message || 'Failed to create manhwa');
     } finally {
       setSubmitting(false);
+      setUploadProgress(0);
     }
   };
 
@@ -262,39 +286,24 @@ const PublisherDashboard: React.FC = () => {
         return;
       }
 
-      // Upload pages to Telegram via edge function
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
       if (!token) throw new Error('Not authenticated');
 
-      const formData = new FormData();
-      formData.append('manga_id', selectedMangaId);
-      formData.append('chapter_id', chapter.id);
-      pageFiles.forEach((file) => {
-        formData.append('pages', file);
-      });
-
-      const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
-      const res = await fetch(
-        `https://${projectId}.supabase.co/functions/v1/telegram-upload`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          body: formData,
+      // Upload pages one-by-one with progress
+      for (let i = 0; i < pageFiles.length; i++) {
+        try {
+          await uploadSinglePage(token, selectedMangaId, chapter.id, pageFiles[i], i + 1);
+        } catch (err: any) {
+          // Clean up chapter if upload failed
+          await supabase.from('chapters').delete().eq('id', chapter.id);
+          throw new Error(`Page ${i + 1} failed: ${err.message}`);
         }
-      );
-
-      const result = await res.json();
-      if (!result.success) {
-        // Clean up chapter if upload failed
-        await supabase.from('chapters').delete().eq('id', chapter.id);
-        throw new Error(result.error || 'Upload failed');
+        setUploadProgress(Math.round(((i + 1) / pageFiles.length) * 100));
       }
 
       const schedLabel = scheduledAt ? ` (scheduled for ${new Date(scheduledAt).toLocaleString()})` : '';
-      toast.success(`Chapter ${chapterNumber} uploaded!${schedLabel} (${result.pages_uploaded} pages) — Admin will review before publishing.`);
+      toast.success(`🎉 Chapter ${chapterNumber} uploaded!${schedLabel} (${pageFiles.length} pages) — Admin will review before publishing.`);
       setPageFiles([]);
       setChapterTitle('');
       setChapterNumber(prev => prev + 1);
@@ -509,9 +518,19 @@ const PublisherDashboard: React.FC = () => {
                   </label>
                 </div>
 
+                {submitting && uploadProgress > 0 && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Uploading pages...</span>
+                      <span>{uploadProgress}%</span>
+                    </div>
+                    <Progress value={uploadProgress} className="h-2" />
+                  </div>
+                )}
+
                 <button type="submit" disabled={!copyrightChecked || !uploadTitle || ch1Files.length === 0 || submitting} className="w-full btn-accent rounded-none py-3 text-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                   {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {submitting ? 'Submitting...' : 'Submit with Chapter 1 for Review'}
+                  {submitting ? `Uploading... ${uploadProgress}%` : 'Submit with Chapter 1 for Review'}
                 </button>
               </form>
             </div>
@@ -607,9 +626,19 @@ const PublisherDashboard: React.FC = () => {
                         )}
                       </div>
 
+                      {uploadingChapter && uploadProgress > 0 && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>Uploading page {Math.ceil((uploadProgress / 100) * pageFiles.length)} of {pageFiles.length}...</span>
+                            <span>{uploadProgress}%</span>
+                          </div>
+                          <Progress value={uploadProgress} className="h-2" />
+                        </div>
+                      )}
+
                       <button type="submit" disabled={pageFiles.length === 0 || uploadingChapter || (scheduleEnabled && (!scheduledDate || !scheduledTime))} className="w-full btn-accent rounded-none py-3 text-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                         {uploadingChapter && <Loader2 className="w-4 h-4 animate-spin" />}
-                        {uploadingChapter ? `Uploading ${pageFiles.length} pages...` : scheduleEnabled ? `Schedule Chapter ${chapterNumber}` : `Upload Chapter ${chapterNumber}`}
+                        {uploadingChapter ? `Uploading... ${uploadProgress}%` : scheduleEnabled ? `Schedule Chapter ${chapterNumber}` : `Upload Chapter ${chapterNumber}`}
                       </button>
                     </form>
 
