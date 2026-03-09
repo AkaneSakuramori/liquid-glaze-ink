@@ -6,7 +6,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const CDN_BASE = "https://ltd-alethea-nbhi763-bc60a88e.koyeb.app";
+const CDN_BASE = Deno.env.get("NAPAEXTRA_URL") || "";
 const BUCKET = "manga-images";
 
 function getSupabase() {
